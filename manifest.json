@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "giaodn.cadence",
+  "name": "Cadence",
+  "version": "1.0.0",
+  "author": "giaodn",
+  "description": "Reminders to eat and drink, reset by logging what you had",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Cadence",
+    "description": "Reminders to eat and drink",
+    "category": "Time",
+    "allowMultiple": false,
+    "defaultSection": "centerEnd"
+  }
+}
