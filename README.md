@@ -25,3 +25,7 @@ Update an installed copy with:
 ```bash
 omarchy plugin update giaodn.cadence
 ```
+
+## License
+
+MIT. See [LICENSE](LICENSE).
