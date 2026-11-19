@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "giaodn.cadence",
   "name": "Cadence",
-  "version": "1.0.0",
+  "version": "0.1-alpha",
   "author": "giaodn",
   "description": "Reminders to eat and drink, reset by logging what you had",
   "kinds": ["bar-widget"],
