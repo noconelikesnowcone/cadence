@@ -7,25 +7,55 @@
 var LIMITS = {
   drinkMinutes: [15, 480],
   foodMinutes: [30, 720],
-  remindAgainMinutes: [5, 120]
+  remindAgainMinutes: [5, 120],
+  windDownMinutes: [0, 180]
 }
 
 var STEPS = {
   drinkMinutes: 15,
   foodMinutes: 30,
-  remindAgainMinutes: 5
+  remindAgainMinutes: 5,
+  sleepStartMinutes: 15,
+  sleepEndMinutes: 15,
+  windDownMinutes: 15
 }
 
 var DEFAULTS = {
   drinkMinutes: 120,
   foodMinutes: 240,
-  remindAgainMinutes: 30
+  remindAgainMinutes: 30,
+  // Off until the panel or shell.json turns it on. 11:00 pm to 7:00 am.
+  sleepEnabled: false,
+  sleepStartMinutes: 23 * 60,
+  sleepEndMinutes: 7 * 60,
+  // How long before sleep the bedtime chime begins. 0 is off.
+  windDownMinutes: 45
+}
+
+var SETTING_KEYS = [
+  "drinkMinutes",
+  "foodMinutes",
+  "remindAgainMinutes",
+  "sleepEnabled",
+  "sleepStartMinutes",
+  "sleepEndMinutes",
+  "windDownMinutes"
+]
+
+var MINUTE_KEYS = {
+  sleepStartMinutes: true,
+  sleepEndMinutes: true
 }
 
 var GLYPHS = {
   drink: 0xF01AB,
-  food: 0xF0A70
+  food: 0xF0A70,
+  winddown: 0xF0F6C
 }
+
+// Bedtime chime repeats on its own, slower than a snooze and shorter than the wind-down.
+var WIND_AGAIN_MS = 15 * 60 * 1000
+var STAMP_AHEAD_MS = 36 * 60 * 60 * 1000
 
 var NOTE_MAX = 80
 var TEXT_MAX = 200
@@ -43,12 +73,35 @@ function clampInt(value, min, max, fallback) {
   return n
 }
 
+function asBool(value, fallback) {
+  if (value === true || value === false) return value
+  return fallback
+}
+
+function minuteOfDay(value, fallback) {
+  var n = Math.round(Number(value))
+  if (!isFinite(n) || n < 0 || n > 1439) return fallback
+  return n
+}
+
+// Quarter-hour steps roll past midnight instead of sticking at 23:45.
+function wrapMinute(value) {
+  var n = Math.round(Number(value))
+  if (!isFinite(n)) return DEFAULTS.sleepStartMinutes
+  var day = 1440
+  return ((n % day) + day) % day
+}
+
 function settingsFrom(raw) {
   var source = raw && typeof raw === "object" ? raw : {}
   return {
     drinkMinutes: clampInt(source.drinkMinutes, LIMITS.drinkMinutes[0], LIMITS.drinkMinutes[1], DEFAULTS.drinkMinutes),
     foodMinutes: clampInt(source.foodMinutes, LIMITS.foodMinutes[0], LIMITS.foodMinutes[1], DEFAULTS.foodMinutes),
-    remindAgainMinutes: clampInt(source.remindAgainMinutes, LIMITS.remindAgainMinutes[0], LIMITS.remindAgainMinutes[1], DEFAULTS.remindAgainMinutes)
+    remindAgainMinutes: clampInt(source.remindAgainMinutes, LIMITS.remindAgainMinutes[0], LIMITS.remindAgainMinutes[1], DEFAULTS.remindAgainMinutes),
+    sleepEnabled: asBool(source.sleepEnabled, DEFAULTS.sleepEnabled),
+    sleepStartMinutes: minuteOfDay(source.sleepStartMinutes, DEFAULTS.sleepStartMinutes),
+    sleepEndMinutes: minuteOfDay(source.sleepEndMinutes, DEFAULTS.sleepEndMinutes),
+    windDownMinutes: clampInt(source.windDownMinutes, LIMITS.windDownMinutes[0], LIMITS.windDownMinutes[1], DEFAULTS.windDownMinutes)
   }
 }
 
@@ -60,6 +113,9 @@ function freshState(settings) {
     foodNote: "",
     drinkNotifiedAt: 0,
     foodNotifiedAt: 0,
+    earlySleepUntil: 0,
+    windDownAckStart: 0,
+    windDownNotifiedAt: 0,
     history: [],
     settings: settingsFrom(settings)
   }
@@ -84,10 +140,92 @@ function step(key) {
 }
 
 function canNudge(key, delta) {
+  if (MINUTE_KEYS[key]) return isFinite(delta) && delta !== 0
   var limits = LIMITS[key]
   if (!limits) return false
   var next = setting(key) + delta
   return next >= limits[0] && next <= limits[1]
+}
+
+function atMinute(year, month, day, minutes) {
+  var when = new Date(year, month, day, 0, 0, 0, 0)
+  when.setMinutes(minutes)
+  return when.getTime()
+}
+
+// The window is half-open: asleep at the start, awake at the end. A window
+// that crosses midnight belongs to the day it starts.
+function windowBounds(year, month, day, startMin, endMin) {
+  var start = atMinute(year, month, day, startMin)
+  if (endMin > startMin) return [start, atMinute(year, month, day, endMin)]
+  var next = new Date(year, month, day + 1)
+  return [start, atMinute(next.getFullYear(), next.getMonth(), next.getDate(), endMin)]
+}
+
+function cleanStamp(value, now) {
+  var n = Number(value)
+  if (!isFinite(n) || n <= 0) return 0
+  if (now > 0 && (n > now + STAMP_AHEAD_MS || n < now - STAMP_AHEAD_MS)) return 0
+  return n
+}
+
+// The window that contains now, and the next one that has not started.
+function nightContext(now) {
+  ensure()
+  var t = Number(now)
+  var night = {
+    quiet: false,
+    early: false,
+    scheduled: false,
+    winding: false,
+    silenced: false,
+    untilMs: 0,
+    sleepAt: 0,
+    wakeAt: 0
+  }
+  if (!isFinite(t)) return night
+  var settings = session.settings
+  if (settings.sleepEnabled !== true) return night
+  if (settings.sleepStartMinutes === settings.sleepEndMinutes) return night
+  var d = new Date(t)
+  var current = null
+  var upcoming = null
+  for (var offset = -1; offset <= 2; offset++) {
+    var day = new Date(d.getFullYear(), d.getMonth(), d.getDate() + offset)
+    var bounds = windowBounds(day.getFullYear(), day.getMonth(), day.getDate(), settings.sleepStartMinutes, settings.sleepEndMinutes)
+    if (t >= bounds[0] && t < bounds[1] && (!current || bounds[0] < current[0])) current = bounds
+    if (bounds[0] > t && (!upcoming || bounds[0] < upcoming[0])) upcoming = bounds
+  }
+  if (current) {
+    night.quiet = true
+    night.scheduled = true
+    night.sleepAt = current[0]
+    night.wakeAt = current[1]
+    return night
+  }
+  if (upcoming) {
+    night.sleepAt = upcoming[0]
+    night.wakeAt = upcoming[1]
+    var lead = setting("windDownMinutes") * 60000
+    var until = upcoming[0] - t
+    if (lead > 0 && until > 0 && until <= lead) {
+      night.winding = true
+      night.untilMs = until
+      night.silenced = session.windDownAckStart === upcoming[0]
+    }
+  }
+  // Good night pulls quiet hours forward to the scheduled wake, and only that far.
+  if (session.earlySleepUntil > t) {
+    night.quiet = true
+    night.early = true
+    night.winding = false
+    night.wakeAt = session.earlySleepUntil
+  }
+  return night
+}
+
+function isAsleep(now) {
+  return nightContext(now).quiet
 }
 
 function glyph(name) {
@@ -160,6 +298,8 @@ function viewAt(now) {
   ensure()
   var drink = clockOf("drink", now)
   var food = clockOf("food", now)
+  var night = nightContext(now)
+  var t = Number(now)
   return {
     drinkState: drink.state,
     drinkMs: drink.ms,
@@ -172,6 +312,18 @@ function viewAt(now) {
     drinkMinutes: session.settings.drinkMinutes,
     foodMinutes: session.settings.foodMinutes,
     remindAgainMinutes: session.settings.remindAgainMinutes,
+    sleepEnabled: session.settings.sleepEnabled,
+    sleepStartMinutes: session.settings.sleepStartMinutes,
+    sleepEndMinutes: session.settings.sleepEndMinutes,
+    windDownMinutes: session.settings.windDownMinutes,
+    windingDown: night.winding,
+    windDownMs: night.untilMs,
+    windDownSilenced: night.silenced,
+    earlySleep: night.early,
+    asleep: night.quiet,
+    canGoodNight: !night.quiet && night.wakeAt > t,
+    canStayUp: night.early === true && night.scheduled !== true,
+    canAckWindDown: night.winding === true && night.silenced !== true,
     canUndo: session.history.length > 0
   }
 }
@@ -218,6 +370,10 @@ function dueNotices(now) {
   ensure()
   var t = Number(now)
   if (!isFinite(t)) return []
+  // Quiet hours swallow the bell and the notification. The clocks keep
+  // counting. A reminder that comes due overnight fires once the window ends,
+  // not once for every repeat that was missed.
+  if (isAsleep(t)) return []
   var again = setting("remindAgainMinutes") * 60000
   var kinds = ["drink", "food"]
   var notices = []
@@ -234,23 +390,67 @@ function dueNotices(now) {
   return notices
 }
 
+// One bedtime chime when wind-down opens, then again every 15 minutes until
+// it is silenced, good night starts quiet hours, or sleep itself begins.
+function windDownNotice(now) {
+  ensure()
+  var t = Number(now)
+  if (!isFinite(t)) return null
+  var night = nightContext(t)
+  if (!night.winding || night.silenced || night.quiet) return null
+  var last = session.windDownNotifiedAt
+  if (last > 0 && t - last < WIND_AGAIN_MS) return null
+  session.windDownNotifiedAt = t
+  dirty = true
+  return { kind: "winddown", untilMs: night.untilMs, sleepAt: night.sleepAt }
+}
+
+function acknowledgeWindDown(now) {
+  ensure()
+  var t = Number(now)
+  if (!isFinite(t)) return false
+  var night = nightContext(t)
+  if (!night.winding || night.silenced || !(night.sleepAt > 0)) return false
+  session.windDownAckStart = night.sleepAt
+  dirty = true
+  return true
+}
+
+function goodNight(now) {
+  ensure()
+  var t = Number(now)
+  if (!isFinite(t)) return false
+  var night = nightContext(t)
+  if (night.quiet || !(night.wakeAt > t)) return false
+  session.earlySleepUntil = night.wakeAt
+  if (night.sleepAt > 0) session.windDownAckStart = night.sleepAt
+  dirty = true
+  return true
+}
+
+function stayUp(now) {
+  ensure()
+  var t = Number(now)
+  if (!isFinite(t) || !(session.earlySleepUntil > t)) return false
+  if (nightContext(t).scheduled) return false
+  session.earlySleepUntil = 0
+  dirty = true
+  return true
+}
+
 function applySettings(raw) {
   ensure()
-  var merged = {
-    drinkMinutes: session.settings.drinkMinutes,
-    foodMinutes: session.settings.foodMinutes,
-    remindAgainMinutes: session.settings.remindAgainMinutes
-  }
+  var merged = {}
   var incoming = raw && typeof raw === "object" ? raw : {}
-  var keys = ["drinkMinutes", "foodMinutes", "remindAgainMinutes"]
-  for (var i = 0; i < keys.length; i++) {
-    if (incoming[keys[i]] !== undefined && incoming[keys[i]] !== null)
-      merged[keys[i]] = incoming[keys[i]]
+  for (var i = 0; i < SETTING_KEYS.length; i++) {
+    var key = SETTING_KEYS[i]
+    merged[key] = session.settings[key]
+    if (incoming[key] !== undefined && incoming[key] !== null) merged[key] = incoming[key]
   }
   var next = settingsFrom(merged)
   var changed = false
-  for (var k = 0; k < keys.length; k++) {
-    if (next[keys[k]] !== session.settings[keys[k]]) changed = true
+  for (var k = 0; k < SETTING_KEYS.length; k++) {
+    if (next[SETTING_KEYS[k]] !== session.settings[SETTING_KEYS[k]]) changed = true
   }
   session.settings = next
   if (changed) dirty = true
@@ -276,6 +476,9 @@ function parseState(raw, now) {
   if (state.foodAt > 0 && !state.foodNote) state.foodAt = 0
   state.drinkNotifiedAt = cleanAt(data.drinkNotifiedAt, t)
   state.foodNotifiedAt = cleanAt(data.foodNotifiedAt, t)
+  state.earlySleepUntil = cleanStamp(data.earlySleepUntil, t)
+  state.windDownAckStart = cleanStamp(data.windDownAckStart, t)
+  state.windDownNotifiedAt = cleanAt(data.windDownNotifiedAt, t)
   var list = Array.isArray(data.history) ? data.history : []
   for (var i = 0; i < list.length && state.history.length < HISTORY_MAX; i++) {
     var item = list[i]
@@ -317,11 +520,18 @@ function serialize() {
     foodNote: session.foodNote,
     drinkNotifiedAt: session.drinkNotifiedAt,
     foodNotifiedAt: session.foodNotifiedAt,
+    earlySleepUntil: session.earlySleepUntil,
+    windDownAckStart: session.windDownAckStart,
+    windDownNotifiedAt: session.windDownNotifiedAt,
     history: copyHistory(),
     settings: {
       drinkMinutes: session.settings.drinkMinutes,
       foodMinutes: session.settings.foodMinutes,
-      remindAgainMinutes: session.settings.remindAgainMinutes
+      remindAgainMinutes: session.settings.remindAgainMinutes,
+      sleepEnabled: session.settings.sleepEnabled,
+      sleepStartMinutes: session.settings.sleepStartMinutes,
+      sleepEndMinutes: session.settings.sleepEndMinutes,
+      windDownMinutes: session.settings.windDownMinutes
     }
   }, null, 2) + "\n"
 }
@@ -334,6 +544,7 @@ function consumeDirty() {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    acknowledgeWindDown: acknowledgeWindDown,
     applySettings: applySettings,
     canNudge: canNudge,
     clockOf: clockOf,
@@ -341,7 +552,9 @@ if (typeof module !== "undefined") {
     consumeDirty: consumeDirty,
     dueNotices: dueNotices,
     glyph: glyph,
+    goodNight: goodNight,
     hydrate: hydrate,
+    isAsleep: isAsleep,
     isHydrated: isHydrated,
     log: log,
     notificationCopy: notificationCopy,
@@ -349,9 +562,12 @@ if (typeof module !== "undefined") {
     plain: plain,
     serialize: serialize,
     setting: setting,
+    stayUp: stayUp,
     step: step,
     tooltipCopy: tooltipCopy,
     undo: undo,
-    viewAt: viewAt
+    viewAt: viewAt,
+    windDownNotice: windDownNotice,
+    wrapMinute: wrapMinute
   }
 }

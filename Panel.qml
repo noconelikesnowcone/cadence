@@ -39,6 +39,33 @@ Panel {
     return durationPhrase((minutes || 0) * 60000)
   }
 
+  function minuteClock(minutes) {
+    var day = Model.wrapMinute(minutes)
+    var when = new Date(2000, 0, 1, 0, 0, 0, 0)
+    when.setMinutes(day)
+    var locale = Qt.locale(Commons.I18n.formatLocale)
+    return Model.plain(locale.toString(when, locale.timeFormat(Locale.ShortFormat)))
+  }
+
+  function sleepDescription() {
+    if (!host) return ""
+    var from = minuteClock(host.sleepStartMinutes)
+    var until = minuteClock(host.sleepEndMinutes)
+    if (host.sleepStartMinutes === host.sleepEndMinutes) return strings.t("panel.sleepEmpty")
+    if (host.asleep) return strings.t("panel.sleepingNow").arg(until)
+    if (host.windingDown && host.windDownSilenced)
+      return strings.t("panel.windingQuiet").arg(from)
+    if (host.windingDown)
+      return strings.t("panel.windingNow").arg(from).arg(durationPhrase(host.windDownMs))
+    return strings.t("panel.sleepHours").arg(from).arg(until)
+  }
+
+  function windDownValue() {
+    var minutes = host ? host.windDownMinutes : 45
+    if (!minutes) return strings.t("panel.windDownOff")
+    return intervalPhrase(minutes)
+  }
+
   function statusLine(kind) {
     var state = host ? (kind === "food" ? host.foodState : host.drinkState) : "unset"
     var ms = host ? (kind === "food" ? host.foodMs : host.drinkMs) : 0
@@ -48,6 +75,7 @@ Panel {
   }
 
   function statusColor(kind) {
+    if (host && host.asleep) return dim
     var state = host ? (kind === "food" ? host.foodState : host.drinkState) : "unset"
     if (state === "overdue") return Commons.Color.accent
     if (state === "unset") return dim
@@ -101,12 +129,31 @@ Panel {
     if (dy !== 0) {
       var next = cursorRow + dy
       if (next < 0) next = 0
-      if (next > 5) next = 5
+      if (next > 11) next = 11
       cursorRow = next
       return
     }
     if (dx === 0 || !host || cursorRow < 3) return
-    var key = ["drinkMinutes", "foodMinutes", "remindAgainMinutes"][cursorRow - 3]
+    if (cursorRow === 3) {
+      host.setSleepEnabled(dx > 0)
+      return
+    }
+    var keys = [
+      "",
+      "",
+      "",
+      "",
+      "sleepStartMinutes",
+      "sleepEndMinutes",
+      "windDownMinutes",
+      "",
+      "",
+      "drinkMinutes",
+      "foodMinutes",
+      "remindAgainMinutes"
+    ]
+    var key = keys[cursorRow]
+    if (!key) return
     host.nudge(key, dx > 0 ? host.step(key) : -host.step(key))
   }
 
@@ -140,6 +187,12 @@ Panel {
         if (root.cursorRow === 0) drinkRow.focusField()
         else if (root.cursorRow === 1) foodRow.focusField()
         else if (root.cursorRow === 2 && root.host && root.host.canUndo) root.host.undoLast()
+        else if (root.cursorRow === 3 && root.host) root.host.setSleepEnabled(!root.host.sleepEnabled)
+        else if (root.cursorRow === 7 && root.host && root.host.canAckWindDown) root.host.acknowledgeWindDown()
+        else if (root.cursorRow === 8 && root.host) {
+          if (root.host.earlySleep) root.host.stayUp()
+          else root.host.goodNight()
+        }
       }
 
       function finishLog(row, ok) {
@@ -363,15 +416,99 @@ Panel {
               fontFamily: root.fontFamily
             }
 
+            Toggle {
+              width: parent.width
+              label: strings.t("panel.sleep")
+              description: root.sleepDescription()
+              checked: root.host ? root.host.sleepEnabled : false
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              titleSize: Style.font.body
+              hasCursor: root.cursorRow === 3
+              onClicked: {
+                root.cursorRow = 3
+                if (root.host) root.host.setSleepEnabled(!root.host.sleepEnabled)
+              }
+            }
+
+            LengthRow {
+              title: strings.t("panel.sleepFrom")
+              valueText: root.minuteClock(root.host ? root.host.sleepStartMinutes : 23 * 60)
+              selected: root.cursorRow === 4
+              canDecrease: root.host ? root.host.canNudge("sleepStartMinutes", -root.host.step("sleepStartMinutes")) : false
+              canIncrease: root.host ? root.host.canNudge("sleepStartMinutes", root.host.step("sleepStartMinutes")) : false
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onPicked: root.cursorRow = 4
+              onDecrease: { if (root.host) root.host.nudge("sleepStartMinutes", -root.host.step("sleepStartMinutes")) }
+              onIncrease: { if (root.host) root.host.nudge("sleepStartMinutes", root.host.step("sleepStartMinutes")) }
+            }
+
+            LengthRow {
+              title: strings.t("panel.sleepUntil")
+              valueText: root.minuteClock(root.host ? root.host.sleepEndMinutes : 7 * 60)
+              selected: root.cursorRow === 5
+              canDecrease: root.host ? root.host.canNudge("sleepEndMinutes", -root.host.step("sleepEndMinutes")) : false
+              canIncrease: root.host ? root.host.canNudge("sleepEndMinutes", root.host.step("sleepEndMinutes")) : false
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onPicked: root.cursorRow = 5
+              onDecrease: { if (root.host) root.host.nudge("sleepEndMinutes", -root.host.step("sleepEndMinutes")) }
+              onIncrease: { if (root.host) root.host.nudge("sleepEndMinutes", root.host.step("sleepEndMinutes")) }
+            }
+
+            LengthRow {
+              title: strings.t("panel.windDown")
+              valueText: root.windDownValue()
+              selected: root.cursorRow === 6
+              canDecrease: root.host ? root.host.canNudge("windDownMinutes", -root.host.step("windDownMinutes")) : false
+              canIncrease: root.host ? root.host.canNudge("windDownMinutes", root.host.step("windDownMinutes")) : false
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onPicked: root.cursorRow = 6
+              onDecrease: { if (root.host) root.host.nudge("windDownMinutes", -root.host.step("windDownMinutes")) }
+              onIncrease: { if (root.host) root.host.nudge("windDownMinutes", root.host.step("windDownMinutes")) }
+            }
+
+            Button {
+              width: parent.width
+              text: strings.t("panel.ack")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              enabled: root.host ? root.host.canAckWindDown : false
+              opacity: enabled ? 1 : 0.45
+              hasCursor: root.cursorRow === 7
+              onClicked: {
+                root.cursorRow = 7
+                if (root.host) root.host.acknowledgeWindDown()
+              }
+            }
+
+            Button {
+              width: parent.width
+              text: root.host && root.host.earlySleep ? strings.t("panel.stayUp") : strings.t("panel.goodNight")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              enabled: root.host ? (root.host.earlySleep ? root.host.canStayUp : root.host.canGoodNight) : false
+              opacity: enabled ? 1 : 0.45
+              hasCursor: root.cursorRow === 8
+              onClicked: {
+                root.cursorRow = 8
+                if (!root.host) return
+                if (root.host.earlySleep) root.host.stayUp()
+                else root.host.goodNight()
+              }
+            }
+
             LengthRow {
               title: strings.t("panel.drinkEvery")
               valueText: root.intervalPhrase(root.host ? root.host.drinkMinutes : 120)
-              selected: root.cursorRow === 3
+              selected: root.cursorRow === 9
               canDecrease: root.host ? root.host.canNudge("drinkMinutes", -root.host.step("drinkMinutes")) : false
               canIncrease: root.host ? root.host.canNudge("drinkMinutes", root.host.step("drinkMinutes")) : false
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onPicked: root.cursorRow = 3
+              onPicked: root.cursorRow = 9
               onDecrease: { if (root.host) root.host.nudge("drinkMinutes", -root.host.step("drinkMinutes")) }
               onIncrease: { if (root.host) root.host.nudge("drinkMinutes", root.host.step("drinkMinutes")) }
             }
@@ -379,12 +516,12 @@ Panel {
             LengthRow {
               title: strings.t("panel.foodEvery")
               valueText: root.intervalPhrase(root.host ? root.host.foodMinutes : 240)
-              selected: root.cursorRow === 4
+              selected: root.cursorRow === 10
               canDecrease: root.host ? root.host.canNudge("foodMinutes", -root.host.step("foodMinutes")) : false
               canIncrease: root.host ? root.host.canNudge("foodMinutes", root.host.step("foodMinutes")) : false
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onPicked: root.cursorRow = 4
+              onPicked: root.cursorRow = 10
               onDecrease: { if (root.host) root.host.nudge("foodMinutes", -root.host.step("foodMinutes")) }
               onIncrease: { if (root.host) root.host.nudge("foodMinutes", root.host.step("foodMinutes")) }
             }
@@ -392,12 +529,12 @@ Panel {
             LengthRow {
               title: strings.t("panel.again")
               valueText: root.intervalPhrase(root.host ? root.host.remindAgainMinutes : 30)
-              selected: root.cursorRow === 5
+              selected: root.cursorRow === 11
               canDecrease: root.host ? root.host.canNudge("remindAgainMinutes", -root.host.step("remindAgainMinutes")) : false
               canIncrease: root.host ? root.host.canNudge("remindAgainMinutes", root.host.step("remindAgainMinutes")) : false
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onPicked: root.cursorRow = 5
+              onPicked: root.cursorRow = 11
               onDecrease: { if (root.host) root.host.nudge("remindAgainMinutes", -root.host.step("remindAgainMinutes")) }
               onIncrease: { if (root.host) root.host.nudge("remindAgainMinutes", root.host.step("remindAgainMinutes")) }
             }

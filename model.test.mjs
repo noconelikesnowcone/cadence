@@ -227,3 +227,225 @@ test("glyphs are the drink and food marks", () => {
   assert.equal(model.glyph("food"), String.fromCodePoint(0xF0A70))
   assert.equal(model.glyph("calorie"), "")
 })
+
+function local(year, month, day, hour, minute) {
+  return new Date(year, month, day, hour, minute, 0, 0).getTime()
+}
+
+test("quiet hours are off until asked, and the clock keeps counting", () => {
+  const model = load()
+  const logged = local(2026, 0, 15, 22, 42)
+  const night = local(2026, 0, 16, 4, 18)
+  model.log("drink", "water", logged)
+  assert.equal(model.setting("sleepEnabled"), false)
+  assert.equal(model.viewAt(night).asleep, false)
+  assert.equal(model.clockOf("drink", night).state, "overdue")
+  assert.equal(model.clockOf("drink", night).ms, (5 * 60 + 36) * 60 * 1000 - 2 * hour)
+  assert.equal(model.dueNotices(night).length, 1)
+})
+
+test("quiet hours swallow overnight reminders and fire once at wake", () => {
+  const model = load()
+  const logged = local(2026, 0, 15, 22, 42)
+  const night = local(2026, 0, 16, 4, 18)
+  model.hydrate(JSON.stringify({
+    version: 1,
+    drinkAt: logged,
+    drinkNote: "water",
+    foodAt: logged,
+    foodNote: "pho",
+    drinkNotifiedAt: night - 6 * 60 * 1000,
+    foodNotifiedAt: night - 6 * 60 * 1000,
+    settings: { drinkMinutes: 120, foodMinutes: 240, remindAgainMinutes: 30 }
+  }), night)
+  model.applySettings({
+    sleepEnabled: true,
+    sleepStartMinutes: 23 * 60,
+    sleepEndMinutes: 7 * 60
+  })
+
+  assert.equal(model.viewAt(night).asleep, true)
+  assert.equal(model.clockOf("drink", night).state, "overdue")
+  assert.equal(model.clockOf("drink", night).ms, (5 * 60 + 36) * 60 * 1000 - 2 * hour)
+  assert.equal(model.dueNotices(night).length, 0)
+  assert.equal(model.dueNotices(local(2026, 0, 16, 6, 59)).length, 0)
+  const held = JSON.parse(model.serialize())
+  assert.equal(held.drinkNotifiedAt, night - 6 * 60 * 1000)
+  assert.equal(held.foodNotifiedAt, night - 6 * 60 * 1000)
+  assert.equal(held.settings.sleepEnabled, true)
+
+  const wake = local(2026, 0, 16, 7, 0)
+  assert.equal(model.viewAt(wake).asleep, false)
+  assert.deepEqual(kinds(model.dueNotices(wake)), ["drink", "food"])
+  assert.equal(model.dueNotices(wake + 29 * 60 * 1000).length, 0)
+})
+
+test("a quiet window is half-open and may sit inside one day", () => {
+  const model = load()
+  model.applySettings({ sleepEnabled: true, sleepStartMinutes: 23 * 60, sleepEndMinutes: 7 * 60 })
+  assert.equal(model.viewAt(local(2026, 0, 15, 22, 59)).asleep, false)
+  assert.equal(model.viewAt(local(2026, 0, 15, 23, 0)).asleep, true)
+  assert.equal(model.viewAt(local(2026, 0, 16, 6, 59)).asleep, true)
+  assert.equal(model.viewAt(local(2026, 0, 16, 7, 0)).asleep, false)
+  assert.equal(model.viewAt(local(2026, 0, 16, 12, 0)).asleep, false)
+
+  model.applySettings({ sleepStartMinutes: 60, sleepEndMinutes: 5 * 60 })
+  assert.equal(model.viewAt(local(2026, 0, 15, 0, 30)).asleep, false)
+  assert.equal(model.viewAt(local(2026, 0, 15, 1, 0)).asleep, true)
+  assert.equal(model.viewAt(local(2026, 0, 15, 4, 59)).asleep, true)
+  assert.equal(model.viewAt(local(2026, 0, 15, 5, 0)).asleep, false)
+
+  model.applySettings({ sleepEnabled: true, sleepStartMinutes: 22 * 60, sleepEndMinutes: 22 * 60 })
+  assert.equal(model.viewAt(local(2026, 0, 15, 23, 0)).asleep, false)
+})
+
+test("wind-down opens before bedtime, repeats, and can be silenced", () => {
+  const model = load()
+  model.applySettings({
+    sleepEnabled: true,
+    sleepStartMinutes: 23 * 60,
+    sleepEndMinutes: 7 * 60,
+    windDownMinutes: 45
+  })
+  const early = local(2026, 0, 15, 22, 14)
+  const open = local(2026, 0, 15, 22, 15)
+  assert.equal(model.viewAt(early).windingDown, false)
+  assert.equal(model.windDownNotice(early), null)
+  assert.equal(model.viewAt(open).windingDown, true)
+  assert.equal(model.viewAt(open).windDownMs, 45 * 60 * 1000)
+  const first = model.windDownNotice(open)
+  assert.equal(first.kind, "winddown")
+  assert.deepEqual(Object.keys(first).sort(), ["kind", "sleepAt", "untilMs"])
+  assert.equal(model.windDownNotice(open + 14 * 60 * 1000), null)
+  const again = model.windDownNotice(open + 15 * 60 * 1000)
+  assert.equal(again.kind, "winddown")
+  assert.equal(again.untilMs, 30 * 60 * 1000)
+
+  const quiet = load()
+  quiet.applySettings({
+    sleepEnabled: true,
+    sleepStartMinutes: 23 * 60,
+    sleepEndMinutes: 7 * 60,
+    windDownMinutes: 45
+  })
+  assert.equal(quiet.acknowledgeWindDown(open), true)
+  assert.equal(quiet.viewAt(open).windingDown, true)
+  assert.equal(quiet.viewAt(open).windDownSilenced, true)
+  assert.equal(quiet.windDownNotice(open + 15 * 60 * 1000), null)
+  assert.equal(quiet.viewAt(local(2026, 0, 15, 23, 0)).asleep, true)
+  assert.equal(quiet.viewAt(local(2026, 0, 15, 23, 0)).windingDown, false)
+})
+
+test("good night starts quiet hours early and stay up takes them back", () => {
+  const model = load()
+  const at = local(2026, 0, 15, 22, 20)
+  model.applySettings({
+    sleepEnabled: true,
+    sleepStartMinutes: 23 * 60,
+    sleepEndMinutes: 7 * 60,
+    windDownMinutes: 45
+  })
+  model.log("drink", "water", at - 3 * hour)
+  assert.equal(model.dueNotices(at).length, 1)
+  assert.equal(model.goodNight(at), true)
+  assert.equal(model.isAsleep(at + 1000), true)
+  assert.equal(model.viewAt(at + 1000).earlySleep, true)
+  assert.equal(model.dueNotices(at + 1000).length, 0)
+  assert.equal(model.windDownNotice(at + 1000), null)
+  assert.equal(model.goodNight(at + 1000), false)
+  assert.equal(model.stayUp(at + 60 * 1000), true)
+  assert.equal(model.isAsleep(at + 60 * 1000), false)
+  assert.equal(model.viewAt(at + 60 * 1000).windingDown, true)
+
+  assert.equal(model.goodNight(at), true)
+  const during = local(2026, 0, 15, 23, 10)
+  assert.equal(model.stayUp(during), false)
+  assert.equal(model.isAsleep(during), true)
+})
+
+test("wind-down can cross midnight and rejects a bad lead", () => {
+  const model = load()
+  model.applySettings({
+    sleepEnabled: true,
+    sleepStartMinutes: 30,
+    sleepEndMinutes: 7 * 60,
+    windDownMinutes: 60
+  })
+  const at = local(2026, 0, 15, 23, 40)
+  const view = model.viewAt(at)
+  assert.equal(view.windingDown, true)
+  assert.equal(view.windDownMs, 50 * 60 * 1000)
+  assert.equal(model.windDownNotice(at).kind, "winddown")
+  model.applySettings({ windDownMinutes: 0 })
+  assert.equal(model.viewAt(at).windingDown, false)
+  assert.equal(model.windDownNotice(at), null)
+  assert.equal(model.goodNight(at), true)
+
+  model.applySettings({ windDownMinutes: "nope" })
+  assert.equal(model.setting("windDownMinutes"), 45)
+  model.applySettings({ windDownMinutes: 9999 })
+  assert.equal(model.setting("windDownMinutes"), 180)
+  model.applySettings({ windDownMinutes: -4 })
+  assert.equal(model.setting("windDownMinutes"), 0)
+  assert.equal(model.canNudge("windDownMinutes", -15), false)
+  assert.equal(model.glyph("winddown"), String.fromCodePoint(0xF0F6C))
+})
+
+test("a future good-night survives a reload and a far stamp does not", () => {
+  const model = load()
+  const now = local(2026, 0, 15, 22, 30)
+  const wake = local(2026, 0, 16, 7, 0)
+  const parsed = model.parseState(JSON.stringify({
+    version: 1,
+    earlySleepUntil: wake,
+    windDownAckStart: local(2026, 0, 15, 23, 0),
+    windDownNotifiedAt: now - 1000,
+    settings: {
+      sleepEnabled: true,
+      sleepStartMinutes: 23 * 60,
+      sleepEndMinutes: 7 * 60,
+      windDownMinutes: 45
+    }
+  }), now)
+  assert.equal(parsed.earlySleepUntil, wake)
+  assert.equal(parsed.windDownAckStart, local(2026, 0, 15, 23, 0))
+  assert.equal(parsed.windDownNotifiedAt, now - 1000)
+
+  const fresh = load()
+  fresh.hydrate(JSON.stringify({
+    version: 1,
+    earlySleepUntil: wake,
+    settings: { sleepEnabled: true, sleepStartMinutes: 23 * 60, sleepEndMinutes: 7 * 60, windDownMinutes: 45 }
+  }), now)
+  assert.equal(fresh.isAsleep(now), true)
+  assert.equal(fresh.viewAt(now).earlySleep, true)
+  const saved = JSON.parse(fresh.serialize())
+  assert.equal(saved.earlySleepUntil, wake)
+  assert.equal(saved.settings.windDownMinutes, 45)
+
+  const junk = fresh.parseState(JSON.stringify({
+    version: 1,
+    earlySleepUntil: now + 10 * 24 * 60 * 60 * 1000
+  }), now)
+  assert.equal(junk.earlySleepUntil, 0)
+})
+
+test("sleep times wrap at midnight and junk settings fall back", () => {
+  const model = load()
+  assert.equal(model.wrapMinute(23 * 60 + 45 + 15), 0)
+  assert.equal(model.wrapMinute(-15), 23 * 60 + 45)
+  model.applySettings({ sleepEnabled: "yes", sleepStartMinutes: -5, sleepEndMinutes: 9999 })
+  assert.equal(model.setting("sleepEnabled"), false)
+  assert.equal(model.setting("sleepStartMinutes"), 23 * 60)
+  assert.equal(model.setting("sleepEndMinutes"), 7 * 60)
+  assert.equal(model.canNudge("sleepStartMinutes", 15), true)
+  assert.equal(model.canNudge("sleepStartMinutes", 0), false)
+  model.applySettings({ sleepEnabled: true, sleepStartMinutes: 0, sleepEndMinutes: 1439 })
+  assert.equal(model.setting("sleepEnabled"), true)
+  assert.equal(model.setting("sleepStartMinutes"), 0)
+  assert.equal(model.setting("sleepEndMinutes"), 1439)
+  const saved = JSON.parse(model.serialize())
+  assert.equal(saved.settings.sleepEnabled, true)
+  assert.equal(saved.settings.sleepEndMinutes, 1439)
+  assert.equal(/<|>|&/.test(JSON.stringify(saved.settings)), false)
+})

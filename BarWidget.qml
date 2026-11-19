@@ -27,6 +27,18 @@ BarWidget {
     drinkMinutes: 120,
     foodMinutes: 240,
     remindAgainMinutes: 30,
+    sleepEnabled: false,
+    sleepStartMinutes: 23 * 60,
+    sleepEndMinutes: 7 * 60,
+    windDownMinutes: 45,
+    windingDown: false,
+    windDownMs: 0,
+    windDownSilenced: false,
+    earlySleep: false,
+    asleep: false,
+    canGoodNight: false,
+    canStayUp: false,
+    canAckWindDown: false,
     canUndo: false
   })
 
@@ -45,6 +57,7 @@ BarWidget {
   }
 
   readonly property string bellPath: fileUrlPath(Qt.resolvedUrl("bell.wav"))
+  readonly property string windPath: fileUrlPath(Qt.resolvedUrl("winddown.wav"))
 
   readonly property string drinkState: view.drinkState
   readonly property double drinkMs: view.drinkMs
@@ -57,6 +70,18 @@ BarWidget {
   readonly property int drinkMinutes: view.drinkMinutes
   readonly property int foodMinutes: view.foodMinutes
   readonly property int remindAgainMinutes: view.remindAgainMinutes
+  readonly property bool sleepEnabled: view.sleepEnabled === true
+  readonly property int sleepStartMinutes: view.sleepStartMinutes
+  readonly property int sleepEndMinutes: view.sleepEndMinutes
+  readonly property int windDownMinutes: view.windDownMinutes
+  readonly property bool windingDown: view.windingDown === true
+  readonly property double windDownMs: view.windDownMs
+  readonly property bool windDownSilenced: view.windDownSilenced === true
+  readonly property bool earlySleep: view.earlySleep === true
+  readonly property bool asleep: view.asleep === true
+  readonly property bool canGoodNight: view.canGoodNight === true
+  readonly property bool canStayUp: view.canStayUp === true
+  readonly property bool canAckWindDown: view.canAckWindDown === true
   readonly property bool canUndo: view.canUndo === true
 
   readonly property string urgentKind: {
@@ -74,7 +99,34 @@ BarWidget {
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
   readonly property real openPanelIndicatorWidth: face.width
   readonly property real openPanelIndicatorHeight: face.height
-  readonly property string tooltip: tipFor("drink") + "    " + tipFor("food")
+  readonly property string tooltip: {
+    var line = tipFor("drink") + "    " + tipFor("food")
+    if (asleep)
+      return Model.plain(line + "    " + strings.t("bar.sleeping").arg(minuteClock(sleepEndMinutes)))
+    if (windingDown) {
+      var bed = strings.t("bar.winding")
+        .arg(minuteClock(sleepStartMinutes))
+        .arg(durationPhrase(windDownMs))
+      return Model.plain(line + "    " + bed)
+    }
+    return line
+  }
+
+  function minuteClock(minutes) {
+    var day = Model.wrapMinute(minutes)
+    var when = new Date(2000, 0, 1, 0, 0, 0, 0)
+    when.setMinutes(day)
+    return clockText(when)
+  }
+
+  function minuteClockAt(ms) {
+    return clockText(new Date(ms))
+  }
+
+  function clockText(when) {
+    var locale = Qt.locale(Commons.I18n.formatLocale)
+    return Model.plain(locale.toString(when, locale.timeFormat(Locale.ShortFormat)))
+  }
 
   function pad(value) {
     var text = Commons.I18n.formatNumber(value)
@@ -113,6 +165,7 @@ BarWidget {
 
   function kindColor(state) {
     var ink = bar ? bar.barForeground : Commons.Color.foreground
+    if (asleep) return Qt.darker(ink, 1.35)
     if (state === "overdue") return Commons.Color.accent
     if (state === "unset") return Qt.darker(ink, 1.45)
     return ink
@@ -121,12 +174,17 @@ BarWidget {
   function refresh() {
     var t = Date.now()
     now = t
-    var notices = Model.dueNotices(t)
+    var quiet = Model.isAsleep(t)
+    var notices = quiet ? [] : Model.dueNotices(t)
+    var wind = quiet ? null : Model.windDownNotice(t)
     view = Model.viewAt(t)
     saveState()
     for (var i = 0; i < notices.length; i++) sendNotice(notices[i])
-    // One double tap even when drink and food come due together.
-    if (notices.length > 0) ring()
+    if (wind) sendWindNotice(wind)
+    // The bowl replaces the diner bell while winding down, including the
+    // minute a drink or a meal is due as well.
+    if (wind) play(windPath)
+    else if (notices.length > 0 && !view.windingDown) play(bellPath)
   }
 
   function fileUrlPath(url) {
@@ -148,13 +206,13 @@ BarWidget {
     }
   }
 
-  function ring() {
-    if (doNotDisturb() || !bellPath) return
+  function play(path) {
+    if (doNotDisturb() || !path) return
     Util.execArgv([
       "paplay",
       "--client-name", "Cadence",
       "--stream-name", "Cadence",
-      bellPath
+      path
     ])
   }
 
@@ -166,13 +224,29 @@ BarWidget {
   }
 
   function currentSettings() {
-    var keys = ["drinkMinutes", "foodMinutes", "remindAgainMinutes"]
+    var keys = ["drinkMinutes", "foodMinutes", "remindAgainMinutes", "sleepEnabled", "sleepStartMinutes", "sleepEndMinutes", "windDownMinutes"]
     var out = {}
     for (var i = 0; i < keys.length; i++) {
       var value = settings ? settings[keys[i]] : undefined
       if (value !== undefined && value !== null) out[keys[i]] = value
     }
     return out
+  }
+
+  function commitSettings(patch) {
+    var entry = { id: moduleName }
+    if (settings) {
+      for (var existing in settings)
+        if (existing !== "id") entry[existing] = settings[existing]
+    }
+    var keys = ["drinkMinutes", "foodMinutes", "remindAgainMinutes", "sleepEnabled", "sleepStartMinutes", "sleepEndMinutes", "windDownMinutes"]
+    for (var i = 0; i < keys.length; i++) entry[keys[i]] = Model.setting(keys[i])
+    if (patch) {
+      for (var key in patch) entry[key] = patch[key]
+    }
+    settings = entry
+    if (bar && bar.shell && typeof bar.shell.updateEntryInline === "function")
+      bar.shell.updateEntryInline(moduleName, entry)
   }
 
   function sendNotice(notice) {
@@ -191,6 +265,24 @@ BarWidget {
       copy.title
     ]
     if (copy.body) argv.push(copy.body)
+    Util.execArgv(argv)
+  }
+
+  function sendWindNotice(notice) {
+    if (!notice || notice.kind !== "winddown") return
+    var title = Model.plain(strings.t("notice.winddown.title"))
+    var body = Model.plain(strings.t("notice.winddown.body")
+      .arg(minuteClockAt(notice.sleepAt))
+      .arg(durationPhrase(notice.untilMs)))
+    var argv = [
+      "omarchy-notification-send",
+      "--app-name", "Cadence",
+      "-g", Model.glyph("winddown"),
+      "-u", "normal",
+      "-t", "12000",
+      title
+    ]
+    if (body) argv.push(body)
     Util.execArgv(argv)
   }
 
@@ -222,17 +314,35 @@ BarWidget {
 
   function nudge(key, delta) {
     if (!Model.canNudge(key, delta)) return
-    var entry = { id: moduleName }
-    if (settings) {
-      for (var existing in settings)
-        if (existing !== "id") entry[existing] = settings[existing]
-    }
-    var keys = ["drinkMinutes", "foodMinutes", "remindAgainMinutes"]
-    for (var i = 0; i < keys.length; i++) entry[keys[i]] = Model.setting(keys[i])
-    entry[key] = Model.setting(key) + delta
-    settings = entry
-    if (bar && bar.shell && typeof bar.shell.updateEntryInline === "function")
-      bar.shell.updateEntryInline(moduleName, entry)
+    var next = Model.setting(key) + delta
+    if (key === "sleepStartMinutes" || key === "sleepEndMinutes") next = Model.wrapMinute(next)
+    var patch = {}
+    patch[key] = next
+    commitSettings(patch)
+  }
+
+  function setSleepEnabled(on) {
+    var patch = {}
+    patch.sleepEnabled = on === true
+    commitSettings(patch)
+  }
+
+  function acknowledgeWindDown() {
+    if (!Model.acknowledgeWindDown(Date.now())) return false
+    broadcast("refresh")
+    return true
+  }
+
+  function goodNight() {
+    if (!Model.goodNight(Date.now())) return false
+    broadcast("refresh")
+    return true
+  }
+
+  function stayUp() {
+    if (!Model.stayUp(Date.now())) return false
+    broadcast("refresh")
+    return true
   }
 
   function open() {
@@ -326,6 +436,9 @@ BarWidget {
     function logDrink(note: string): void { root.logDrink(note) }
     function logFood(note: string): void { root.logFood(note) }
     function undo(): void { root.undoLast() }
+    function acknowledgeWindDown(): void { root.acknowledgeWindDown() }
+    function goodNight(): void { root.goodNight() }
+    function stayUp(): void { root.stayUp() }
   }
 
   WidgetButton {
