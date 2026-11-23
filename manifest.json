@@ -14,6 +14,6 @@
     "description": "Reminders to eat and drink",
     "category": "Time",
     "allowMultiple": false,
-    "defaultSection": "centerEnd"
+    "defaultSection": "center"
   }
 }
