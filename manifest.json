@@ -4,7 +4,7 @@
   "name": "Cadence",
   "version": "0.1-alpha",
   "author": "giaodn",
-  "description": "Reminders to eat and drink, reset by logging what you had",
+  "description": "Reminders to eat and drink, and a habit of protein, vegetables, and water",
   "kinds": ["bar-widget"],
   "entryPoints": {
     "barWidget": "BarWidget.qml"

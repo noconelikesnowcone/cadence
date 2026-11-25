@@ -3,7 +3,7 @@ import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 
-// What was eaten or drunk. The note is a label for the clock reset, not a measure.
+// What was eaten or drunk. The note resets the clock. The words steer the next habit.
 Item {
   id: root
 

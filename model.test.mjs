@@ -116,6 +116,10 @@ test("history keeps the six newest labels and nothing else about them", () => {
   assert.equal(saved.history.length, 6)
   assert.equal(saved.history[0].note, "item 6")
   assert.deepEqual(Object.keys(saved.history[0]).sort(), ["at", "kind", "note"])
+  assert.equal(saved.plates.length, 3)
+  assert.deepEqual(Object.keys(saved.plates[0]).sort(), ["at", "note"])
+  assert.equal(saved.plates[0].note, "item 5")
+  assert.equal(saved.proteinAt, undefined)
   const banned = JSON.stringify(saved)
   assert.equal(/calorie|kcal|energy|protein|carb/i.test(banned), false)
   assert.equal(Object.hasOwn(saved, "calories"), false)
@@ -448,4 +452,197 @@ test("sleep times wrap at midnight and junk settings fall back", () => {
   assert.equal(saved.settings.sleepEnabled, true)
   assert.equal(saved.settings.sleepEndMinutes, 1439)
   assert.equal(/<|>|&/.test(JSON.stringify(saved.settings)), false)
+})
+
+function plate(model, note, protein, vegetable, heavy) {
+  const got = model.readFood(note)
+  assert.equal(got.protein, protein)
+  assert.equal(got.vegetable, vegetable)
+  assert.equal(got.heavy, heavy)
+}
+
+test("words name a habit and ignore lookalikes", () => {
+  const model = load()
+  plate(model, "eggplant", false, true, false)
+  plate(model, "green beans", false, true, false)
+  plate(model, "green beans and rice", false, true, true)
+  plate(model, "black beans", true, false, false)
+  plate(model, "pasta with tomato sauce", false, false, true)
+  plate(model, "pepperoni pizza", true, false, true)
+  plate(model, "hamburger", true, false, true)
+  plate(model, "chicken, rice, and broccoli", true, true, true)
+  plate(model, "fish and chips", true, false, true)
+  assert.equal(model.readDrink("water").sugary, false)
+  assert.equal(model.readDrink("tea").sugary, false)
+  assert.equal(model.readDrink("club soda").sugary, false)
+  assert.equal(model.readDrink("soda water").sugary, false)
+  assert.equal(model.readDrink("sparkling water").sugary, false)
+  assert.equal(model.readDrink("coke").sugary, true)
+  assert.equal(model.readDrink("Diet Coke").sugary, true)
+  assert.equal(model.readDrink("sweet tea").sugary, true)
+  assert.equal(model.readDrink("cream soda").sugary, true)
+  assert.equal(model.nudgeKey("sugary"), "nudge.sugary")
+  assert.equal(model.nudgeKey("calories"), "")
+})
+
+test("a sweet drink still resets the clock and asks for water", () => {
+  const model = load()
+  const now = 1_700_000_000_000
+  assert.equal(model.log("drink", "coke", now), true)
+  assert.equal(model.clockOf("drink", now).state, "remaining")
+  const view = model.viewAt(now)
+  assert.equal(view.drinkNudge, "sugary")
+  assert.equal(view.foodNudge, "")
+  assert.equal(view.hasPlate, false)
+  const nudges = model.takeNudges()
+  assert.equal(nudges.length, 1)
+  assert.equal(nudges[0].code, "sugary")
+  assert.equal(nudges[0].note, "coke")
+  assert.equal(model.takeNudges().length, 0)
+  assert.equal(model.viewAt(now).drinkNudge, "sugary")
+  assert.equal(model.log("drink", "water", now + 1000), true)
+  assert.equal(model.viewAt(now + 1000).drinkNudge, "")
+  assert.equal(model.clockOf("drink", now + 1000).state, "remaining")
+})
+
+test("starch nudges only when protein or a vegetable is missing", () => {
+  const model = load()
+  const now = 1_700_000_000_000
+  assert.equal(model.log("food", "rice", now), true)
+  assert.equal(model.viewAt(now).foodNudge, "heavyBare")
+  assert.equal(model.viewAt(now).proteinAt, 0)
+  assert.equal(model.viewAt(now).vegetableAt, 0)
+  assert.equal(model.clockOf("food", now).state, "remaining")
+  assert.equal(model.takeNudges()[0].code, "heavyBare")
+
+  assert.equal(model.log("food", "chicken and rice", now + 1000), true)
+  assert.equal(model.viewAt(now + 1000).foodNudge, "heavyProtein")
+  assert.equal(model.viewAt(now + 1000).proteinAt, now + 1000)
+  assert.equal(model.takeNudges()[0].code, "heavyProtein")
+
+  assert.equal(model.log("food", "chicken, rice, and broccoli", now + 2000), true)
+  const balanced = model.viewAt(now + 2000)
+  assert.equal(balanced.foodNudge, "")
+  assert.equal(balanced.proteinAt, now + 2000)
+  assert.equal(balanced.vegetableAt, now + 2000)
+  assert.equal(model.takeNudges().length, 0)
+  assert.equal(model.signalFresh(balanced.proteinAt, now + 2000), true)
+})
+
+test("a drink keeps the meal habit, and undo puts the previous plate back", () => {
+  const model = load()
+  const now = 1_700_000_000_000
+  model.log("food", "rice", now)
+  model.log("drink", "coke", now + 1000)
+  const both = model.viewAt(now + 1000)
+  assert.equal(both.drinkNudge, "sugary")
+  assert.equal(both.foodNudge, "heavyBare")
+  assert.equal(model.takeNudges().map((nudge) => nudge.kind).sort().join(","), "drink,food")
+
+  model.log("drink", "water", now + 2000)
+  assert.equal(model.viewAt(now + 2000).drinkNudge, "")
+  assert.equal(model.viewAt(now + 2000).foodNudge, "heavyBare")
+
+  model.log("food", "rice and spinach", now + 3000)
+  assert.equal(model.viewAt(now + 3000).foodNudge, "heavyVegetable")
+  assert.equal(model.undo(), true)
+  const restored = model.viewAt(now + 3000)
+  assert.equal(restored.foodNote, "rice")
+  assert.equal(restored.foodNudge, "heavyBare")
+  assert.equal(restored.vegetableAt, 0)
+  assert.equal(restored.drinkNudge, "")
+})
+
+test("a food reminder names a habit that has been quiet for 8 hours", () => {
+  const model = load()
+  const now = 1_700_000_000_000
+  assert.equal(model.missingKey(now), "")
+  model.log("food", "chicken and broccoli", now - hour)
+  assert.equal(model.missingKey(now), "")
+  const sided = load()
+  sided.log("food", "spinach", now - 9 * hour)
+  sided.log("food", "chicken", now - hour)
+  assert.equal(sided.missingKey(now), "notice.food.vegetable")
+  assert.equal(model.signalFresh(now - hour, now), true)
+  assert.equal(model.signalFresh(now - 8 * hour, now), false)
+
+  const stale = load()
+  stale.log("food", "rice", now - 9 * hour)
+  assert.equal(stale.missingKey(now), "notice.food.both")
+  const recent = load()
+  recent.log("food", "salad", now - 3 * hour)
+  assert.equal(recent.missingKey(now), "notice.food.protein")
+})
+
+test("the saved meal is still the words", () => {
+  const model = load()
+  const now = 1_700_000_000_000
+  model.log("food", "chicken and rice", now)
+  model.log("drink", "coke", now + 1000)
+  const saved = JSON.parse(model.serialize())
+  assert.deepEqual(Object.keys(saved.history[0]).sort(), ["at", "kind", "note"])
+  assert.deepEqual(Object.keys(saved.plates[0]).sort(), ["at", "note"])
+  assert.equal(saved.plates[0].note, "chicken and rice")
+  assert.equal(saved.pendingDrink, true)
+  assert.equal(saved.pendingFood, true)
+  assert.equal(saved.proteinAt, undefined)
+  assert.equal(saved.calories, undefined)
+  assert.equal(/calorie|kcal|energy|protein|carb/i.test(JSON.stringify(saved)), false)
+
+  const again = load()
+  again.hydrate(JSON.stringify(saved), now + 1000)
+  assert.equal(again.viewAt(now + 1000).foodNudge, "heavyProtein")
+  assert.equal(again.viewAt(now + 1000).drinkNudge, "sugary")
+  assert.equal(again.takeNudges().length, 2)
+})
+
+test("old saves grow a plate from the meal on the clock", () => {
+  const model = load()
+  const now = 1_700_000_000_000
+  model.hydrate(JSON.stringify({
+    version: 1,
+    foodAt: now,
+    foodNote: "chicken and rice",
+    history: [{ kind: "food", note: "chicken and rice", at: now }]
+  }), now)
+  const view = model.viewAt(now)
+  assert.equal(view.hasPlate, true)
+  assert.equal(view.proteinAt, now)
+  assert.equal(view.foodNudge, "heavyProtein")
+  assert.equal(model.takeNudges().length, 0)
+
+  const explicit = load()
+  const parsed = explicit.parseState(JSON.stringify({
+    version: 1,
+    plates: [],
+    pendingDrink: "yes",
+    pendingFood: true,
+    history: [{ kind: "food", note: "chicken", at: now }]
+  }), now)
+  assert.equal(parsed.plates.length, 0)
+  assert.equal(parsed.pendingDrink, false)
+  assert.equal(parsed.pendingFood, true)
+})
+
+test("plate memory keeps the newest meals and drops a bad note", () => {
+  const model = load()
+  const start = 1_700_000_000_000
+  for (let i = 0; i < 25; i++) model.log("food", i === 24 ? "chicken" : "rice", start + i * 1000)
+  const saved = JSON.parse(model.serialize())
+  assert.equal(saved.plates.length, 24)
+  assert.equal(saved.plates[0].note, "chicken")
+  assert.equal(model.viewAt(start + 24 * 1000).proteinAt, start + 24 * 1000)
+  assert.equal(saved.history.length, 6)
+
+  const parsed = model.parseState(JSON.stringify({
+    version: 1,
+    plates: [
+      { note: tracker, at: start },
+      { note: "rice", at: start - hour },
+      { note: "", at: start },
+      { note: "x".repeat(200), at: start - 1000 }
+    ]
+  }), start)
+  assert.equal(parsed.plates.some((plate) => plate.note === "rice"), true)
+  assert.equal(parsed.plates.every((plate) => plate.note.length <= 80), true)
 })

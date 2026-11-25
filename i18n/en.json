@@ -41,5 +41,20 @@
   "notice.drink.title": "Time for a drink",
   "notice.food.title": "Time to eat",
   "notice.body": "Last was %1.",
-  "notice.bodyEmpty": "The reminder is due."
+  "notice.bodyEmpty": "The reminder is due.",
+  "plate.proteinNone": "No protein logged yet",
+  "plate.proteinNow": "Protein just now",
+  "plate.proteinAgo": "Last protein was %1 ago",
+  "plate.vegetableNone": "No vegetable logged yet",
+  "plate.vegetableNow": "Vegetable just now",
+  "plate.vegetableAgo": "Last vegetable was %1 ago",
+  "nudge.sugary": "Water next, if you can.",
+  "nudge.heavyBare": "Add protein or a vegetable.",
+  "nudge.heavyProtein": "Add a vegetable next.",
+  "nudge.heavyVegetable": "Add some protein next.",
+  "notice.nudge.drink.title": "Sweet drink",
+  "notice.nudge.food.title": "Mostly starch",
+  "notice.food.protein": "Protein has been missing.",
+  "notice.food.vegetable": "Vegetables have been missing.",
+  "notice.food.both": "Protein and vegetables have been missing."
 }

@@ -92,6 +92,25 @@ Panel {
     return kind === "food" ? host.foodFraction : host.drinkFraction
   }
 
+  function signalText(at, noneKey, nowKey, agoKey) {
+    if (!(at > 0)) return strings.t(noneKey)
+    var elapsed = (host ? host.now : 0) - at
+    if (!isFinite(elapsed) || elapsed < 60000) return strings.t(nowKey)
+    return strings.t(agoKey).arg(durationPhrase(elapsed))
+  }
+
+  function signalColor(at) {
+    if (Model.signalFresh(at, host ? host.now : 0)) return dim
+    return Commons.Color.accent
+  }
+
+  function nudgeLine(code) {
+    var key = Model.nudgeKey(code)
+    if (!key) return ""
+    var titleKey = code === "sugary" ? "notice.nudge.drink.title" : "notice.nudge.food.title"
+    return strings.t(titleKey) + " · " + strings.t(key)
+  }
+
   function open() {
     cursorRow = 0
     dismissEditors()
@@ -305,6 +324,16 @@ Panel {
                 keyCatcher.finishLog(drinkRow, root.host && root.host.logDrink(text))
               }
             }
+
+            PlainText {
+              width: parent.width
+              visible: root.host && root.host.drinkNudge !== ""
+              wrapMode: Text.WordWrap
+              text: root.nudgeLine(root.host ? root.host.drinkNudge : "")
+              color: Commons.Color.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
           }
 
           Column {
@@ -387,6 +416,42 @@ Panel {
                 root.cursorRow = 1
                 keyCatcher.finishLog(foodRow, root.host && root.host.logFood(text))
               }
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+              visible: root.host && root.host.hasPlate
+
+              PlainText {
+                width: parent.width
+                text: root.signalText(root.host ? root.host.proteinAt : 0, "plate.proteinNone", "plate.proteinNow", "plate.proteinAgo")
+                color: root.signalColor(root.host ? root.host.proteinAt : 0)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+                Behavior on color { ColorAnimation { duration: Style.duration(160) } }
+              }
+
+              PlainText {
+                width: parent.width
+                text: root.signalText(root.host ? root.host.vegetableAt : 0, "plate.vegetableNone", "plate.vegetableNow", "plate.vegetableAgo")
+                color: root.signalColor(root.host ? root.host.vegetableAt : 0)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+                Behavior on color { ColorAnimation { duration: Style.duration(160) } }
+              }
+            }
+
+            PlainText {
+              width: parent.width
+              visible: root.host && root.host.foodNudge !== ""
+              wrapMode: Text.WordWrap
+              text: root.nudgeLine(root.host ? root.host.foodNudge : "")
+              color: Commons.Color.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
           }
 

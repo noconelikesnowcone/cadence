@@ -1,8 +1,9 @@
 .pragma library
 
 // One session for every monitor. Two clocks, drink and food. Logging what
-// you had resets that clock. The note is only a label for the reset. Nothing
-// here sums, weighs, or scores what was logged.
+// you had resets that clock. The words are read to build a habit: protein,
+// vegetables, and water, and a lighter hand with starch and sweet drinks.
+// Nothing here sums, weighs, or counts calories.
 
 var LIMITS = {
   drinkMinutes: [15, 480],
@@ -60,6 +61,9 @@ var STAMP_AHEAD_MS = 36 * 60 * 60 * 1000
 var NOTE_MAX = 80
 var TEXT_MAX = 200
 var HISTORY_MAX = 6
+var PLATE_MAX = 24
+// A protein or a vegetable older than this is named when the food reminder is due.
+var GAP_MS = 8 * 60 * 60 * 1000
 
 var session = null
 var hydrated = false
@@ -117,6 +121,9 @@ function freshState(settings) {
     windDownAckStart: 0,
     windDownNotifiedAt: 0,
     history: [],
+    plates: [],
+    pendingDrink: false,
+    pendingFood: false,
     settings: settingsFrom(settings)
   }
 }
@@ -300,6 +307,8 @@ function viewAt(now) {
   var food = clockOf("food", now)
   var night = nightContext(now)
   var t = Number(now)
+  var drinkHabit = currentDrinkNudge()
+  var foodHabit = currentFoodNudge()
   return {
     drinkState: drink.state,
     drinkMs: drink.ms,
@@ -309,6 +318,11 @@ function viewAt(now) {
     foodMs: food.ms,
     foodFraction: food.fraction,
     foodNote: session.foodNote,
+    proteinAt: signalAt("protein"),
+    vegetableAt: signalAt("vegetable"),
+    hasPlate: session.plates.length > 0,
+    drinkNudge: drinkHabit ? drinkHabit.code : "",
+    foodNudge: foodHabit ? foodHabit.code : "",
     drinkMinutes: session.settings.drinkMinutes,
     foodMinutes: session.settings.foodMinutes,
     remindAgainMinutes: session.settings.remindAgainMinutes,
@@ -328,6 +342,218 @@ function viewAt(now) {
   }
 }
 
+// Whole words and phrases only. "Eggplant" is not an egg, "green beans" are
+// not the bean habit, and "soda water" is not a soda. A plate that already
+// has protein and a vegetable is the habit, starch and all.
+var PROTEIN = [
+  "chicken", "beef", "steak", "pork", "bacon", "ham", "turkey", "lamb", "duck",
+  "fish", "salmon", "tuna", "shrimp", "prawn", "crab", "cod", "tilapia", "trout",
+  "sardine", "sardines", "mackerel", "anchovy", "scallop",
+  "tofu", "tempeh", "seitan", "edamame",
+  "egg", "eggs", "omelette", "omelet",
+  "lentil", "lentils", "chickpea", "chickpeas", "hummus", "dal",
+  "black beans", "kidney beans", "pinto beans", "beans", "bean",
+  "yogurt", "yoghurt", "skyr", "quark", "cottage cheese",
+  "cheese", "paneer", "halloumi", "parmesan", "mozzarella", "cheddar", "feta", "ricotta",
+  "peanut butter", "peanut", "peanuts", "almond", "almonds", "nuts",
+  "sausage", "meatball", "meatballs", "jerky", "whey", "protein", "meat", "milk",
+  "burger", "hamburger", "cheeseburger", "hot dog", "hotdog", "pepperoni"
+]
+
+var VEGETABLE = [
+  "salad", "broccoli", "spinach", "kale", "carrot", "carrots",
+  "vegetable", "vegetables", "veggie", "veggies", "veg", "greens",
+  "lettuce", "cabbage", "zucchini", "courgette", "asparagus",
+  "pepper", "peppers", "cucumber", "tomato", "tomatoes",
+  "onion", "onions", "mushroom", "mushrooms", "cauliflower",
+  "brussels sprouts", "brussels", "bok choy", "pak choi", "celery",
+  "eggplant", "aubergine",
+  "green beans", "green bean", "string beans", "string bean", "bean sprouts", "bean sprout",
+  "snap peas", "peas", "pea", "squash", "pumpkin",
+  "radish", "beet", "beets", "arugula", "rocket", "chard",
+  "collard", "collards", "okra", "artichoke", "leek", "leeks", "fennel",
+  "sauerkraut", "kimchi", "slaw", "avocado", "seaweed", "nori",
+  "pickle", "pickles", "salsa", "guacamole", "sweet potato", "sweet potatoes"
+]
+
+var NOT_VEGETABLE = [
+  "tomato sauce", "tomato paste", "ketchup", "catsup", "onion rings", "pepperoni"
+]
+
+var NOT_PROTEIN = [
+  "green beans", "green bean", "string beans", "string bean", "bean sprouts", "bean sprout"
+]
+
+var STARCH = [
+  "fried rice", "white rice", "brown rice", "rice", "risotto", "biryani", "sushi", "congee",
+  "porridge", "oatmeal", "oats", "cereal", "granola", "couscous", "polenta", "gnocchi",
+  "mac and cheese", "mac n cheese", "mac cheese", "macaroni", "spaghetti", "lasagna", "ravioli", "pasta",
+  "instant noodles", "noodles", "noodle", "ramen", "udon", "soba", "pho", "pad thai", "lo mein", "chow mein",
+  "garlic bread", "bread", "toast", "bagel", "baguette", "brioche", "focaccia", "ciabatta", "sourdough",
+  "naan", "pita", "tortilla", "wrap", "sandwich", "burrito", "taco", "quesadilla", "nachos",
+  "croissant", "bun", "buns", "roll", "rolls", "biscuit", "biscuits", "muffin", "pretzel",
+  "cracker", "crackers", "pancake", "pancakes", "waffle", "waffles",
+  "donut", "doughnut", "pastry", "cake", "cookie", "cookies", "brownie", "gingerbread",
+  "ice cream", "icecream", "chocolate", "candy", "pizza",
+  "burger", "hamburger", "cheeseburger", "hot dog", "hotdog", "sub", "hoagie",
+  "dumpling", "dumplings", "pierogi",
+  "french fries", "fries", "chips", "crisps", "onion rings",
+  "potato", "potatoes", "hash brown", "hash browns", "tater tots",
+  "popcorn", "cornbread", "sweetcorn", "corn", "tortilla chips"
+]
+
+var SUGARY = [
+  "sweet tea", "bubble tea", "milk tea", "energy drink", "red bull", "mountain dew",
+  "dr pepper", "hot chocolate", "chocolate milk", "orange juice", "apple juice",
+  "grape juice", "cranberry juice", "fruit juice", "soft drink", "milk shake",
+  "ginger ale", "root beer", "cream soda", "soda pop", "coca cola", "coke zero",
+  "diet coke", "diet pepsi", "ginger beer", "kool aid",
+  "cola", "coke", "pepsi", "sprite", "fanta", "7up", "7 up", "soda", "pop",
+  "juice", "lemonade", "smoothie", "milkshake", "gatorade", "powerade", "lucozade",
+  "ribena", "frappuccino", "mocha", "boba", "monster", "koolaid", "tonic", "squash",
+  "horchata", "chocolate", "caramel", "sugar", "syrup", "honey", "sweetened", "nectar"
+]
+
+var NOT_SUGARY = ["club soda", "soda water", "baking soda"]
+
+var NUDGE_KEYS = {
+  sugary: "nudge.sugary",
+  heavyBare: "nudge.heavyBare",
+  heavyProtein: "nudge.heavyProtein",
+  heavyVegetable: "nudge.heavyVegetable"
+}
+
+function norm(note) {
+  return String(note || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "")
+}
+
+function hasAny(text, phrases) {
+  var padded = " " + text + " "
+  for (var i = 0; i < phrases.length; i++) {
+    if (!phrases[i]) continue
+    if (padded.indexOf(" " + phrases[i] + " ") !== -1) return true
+  }
+  return false
+}
+
+function blankPhrases(text, phrases) {
+  var ranked = phrases.slice().sort(function(a, b) { return b.length - a.length })
+  var out = " " + text + " "
+  for (var i = 0; i < ranked.length; i++) {
+    if (!ranked[i]) continue
+    var phrase = " " + ranked[i] + " "
+    var guard = 0
+    while (out.indexOf(phrase) !== -1 && guard < 8) {
+      out = out.replace(phrase, " ")
+      guard++
+    }
+  }
+  return out.replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "")
+}
+
+function readFood(note) {
+  var text = norm(plain(note, NOTE_MAX))
+  return {
+    protein: hasAny(blankPhrases(text, NOT_PROTEIN), PROTEIN),
+    vegetable: hasAny(blankPhrases(text, NOT_VEGETABLE), VEGETABLE),
+    heavy: hasAny(text, STARCH)
+  }
+}
+
+function readDrink(note) {
+  var text = blankPhrases(norm(plain(note, NOTE_MAX)), NOT_SUGARY)
+  return { sugary: hasAny(text, SUGARY) }
+}
+
+// Starch is the nudge only when the plate is missing the habit.
+function foodNudgeCode(reading) {
+  if (!reading || !reading.heavy) return ""
+  if (reading.protein && reading.vegetable) return ""
+  if (reading.protein) return "heavyProtein"
+  if (reading.vegetable) return "heavyVegetable"
+  return "heavyBare"
+}
+
+function nudgeKey(code) {
+  return NUDGE_KEYS[code] || ""
+}
+
+function signalAt(flag) {
+  ensure()
+  var best = 0
+  for (var i = 0; i < session.plates.length; i++) {
+    var plate = session.plates[i]
+    if (!readFood(plate.note)[flag]) continue
+    if (plate.at > best) best = plate.at
+  }
+  return best
+}
+
+function signalFresh(at, now) {
+  var stamp = Number(at)
+  var t = Number(now)
+  if (!(stamp > 0) || !isFinite(t)) return false
+  return t - stamp < GAP_MS
+}
+
+function missingKey(now) {
+  ensure()
+  if (!session.plates.length) return ""
+  var t = Number(now)
+  if (!isFinite(t)) return ""
+  var proteinMiss = !signalFresh(signalAt("protein"), t)
+  var vegetableMiss = !signalFresh(signalAt("vegetable"), t)
+  if (proteinMiss && vegetableMiss) return "notice.food.both"
+  if (proteinMiss) return "notice.food.protein"
+  if (vegetableMiss) return "notice.food.vegetable"
+  return ""
+}
+
+function currentDrinkNudge() {
+  ensure()
+  if (!(session.drinkAt > 0) || !session.drinkNote) return null
+  if (!readDrink(session.drinkNote).sugary) return null
+  return { kind: "drink", code: "sugary", note: session.drinkNote, at: session.drinkAt }
+}
+
+function currentFoodNudge() {
+  ensure()
+  if (!session.plates.length) return null
+  var plate = session.plates[0]
+  var code = foodNudgeCode(readFood(plate.note))
+  if (!code) return null
+  return { kind: "food", code: code, note: plate.note, at: plate.at }
+}
+
+function dropPlate(at, note) {
+  for (var i = 0; i < session.plates.length; i++) {
+    if (session.plates[i].at === at && session.plates[i].note === note) {
+      session.plates.splice(i, 1)
+      return
+    }
+  }
+}
+
+// The toast for a nudge that has not been shown yet. Clears the pending flags.
+function takeNudges() {
+  ensure()
+  var nudges = []
+  if (session.pendingDrink === true) {
+    var drink = currentDrinkNudge()
+    if (drink) nudges.push(drink)
+  }
+  if (session.pendingFood === true) {
+    var food = currentFoodNudge()
+    if (food) nudges.push(food)
+  }
+  if (session.pendingDrink === true || session.pendingFood === true) {
+    session.pendingDrink = false
+    session.pendingFood = false
+    dirty = true
+  }
+  return nudges
+}
+
 function log(kind, note, now) {
   if (kind !== "drink" && kind !== "food") return false
   var cleaned = plain(note, NOTE_MAX)
@@ -339,6 +565,13 @@ function log(kind, note, now) {
   session[kind + "NotifiedAt"] = 0
   session.history.unshift({ kind: kind, note: cleaned, at: t })
   if (session.history.length > HISTORY_MAX) session.history.length = HISTORY_MAX
+  // A sweet drink or a starchy plate still resets the clock. The nudge is the habit.
+  if (kind === "drink") session.pendingDrink = readDrink(cleaned).sugary === true
+  if (kind === "food") {
+    session.plates.unshift({ at: t, note: cleaned })
+    if (session.plates.length > PLATE_MAX) session.plates.length = PLATE_MAX
+    session.pendingFood = foodNudgeCode(readFood(cleaned)) !== ""
+  }
   dirty = true
   return true
 }
@@ -362,6 +595,11 @@ function undo() {
     session[entry.kind + "Note"] = ""
   }
   session[entry.kind + "NotifiedAt"] = 0
+  if (entry.kind === "drink") session.pendingDrink = false
+  if (entry.kind === "food") {
+    session.pendingFood = false
+    dropPlate(entry.at, entry.note)
+  }
   dirty = true
   return true
 }
@@ -488,7 +726,44 @@ function parseState(raw, now) {
     if (!note || !(at > 0)) continue
     state.history.push({ kind: item.kind, note: note, at: at })
   }
+  state.plates = platesFrom(data, state.history, state.foodAt, state.foodNote, t)
+  state.pendingDrink = data.pendingDrink === true
+  state.pendingFood = data.pendingFood === true
   return state
+}
+
+function cleanPlates(list, now) {
+  var out = []
+  if (!Array.isArray(list)) return out
+  for (var i = 0; i < list.length && out.length < PLATE_MAX; i++) {
+    var item = list[i]
+    if (!item || typeof item !== "object") continue
+    var note = plain(item.note, NOTE_MAX)
+    var at = cleanAt(item.at, now)
+    if (!note || !(at > 0)) continue
+    out.push({ at: at, note: note })
+  }
+  return out
+}
+
+// Older saves have the meal on the clock and not a plate list. Read that meal
+// once so the habit has a place to start. A saved plate list is left alone.
+function platesFrom(data, history, foodAt, foodNote, now) {
+  if (Array.isArray(data.plates)) return cleanPlates(data.plates, now)
+  var seeded = []
+  for (var i = 0; i < history.length; i++) {
+    if (history[i].kind !== "food") continue
+    seeded.push({ at: history[i].at, note: history[i].note })
+  }
+  if (foodAt > 0 && foodNote) {
+    var found = false
+    for (var j = 0; j < seeded.length; j++) {
+      if (seeded[j].at === foodAt && seeded[j].note === foodNote) found = true
+    }
+    if (!found) seeded.unshift({ at: foodAt, note: foodNote })
+  }
+  if (seeded.length > PLATE_MAX) seeded.length = PLATE_MAX
+  return seeded
 }
 
 function hydrate(raw, now) {
@@ -510,6 +785,15 @@ function copyHistory() {
   return out
 }
 
+function copyPlates() {
+  var out = []
+  for (var i = 0; i < session.plates.length; i++) {
+    var plate = session.plates[i]
+    out.push({ at: plate.at, note: plate.note })
+  }
+  return out
+}
+
 function serialize() {
   ensure()
   return JSON.stringify({
@@ -524,6 +808,9 @@ function serialize() {
     windDownAckStart: session.windDownAckStart,
     windDownNotifiedAt: session.windDownNotifiedAt,
     history: copyHistory(),
+    plates: copyPlates(),
+    pendingDrink: session.pendingDrink === true,
+    pendingFood: session.pendingFood === true,
     settings: {
       drinkMinutes: session.settings.drinkMinutes,
       foodMinutes: session.settings.foodMinutes,
@@ -557,13 +844,19 @@ if (typeof module !== "undefined") {
     isAsleep: isAsleep,
     isHydrated: isHydrated,
     log: log,
+    missingKey: missingKey,
     notificationCopy: notificationCopy,
+    nudgeKey: nudgeKey,
     parseState: parseState,
+    readDrink: readDrink,
+    readFood: readFood,
     plain: plain,
     serialize: serialize,
     setting: setting,
+    signalFresh: signalFresh,
     stayUp: stayUp,
     step: step,
+    takeNudges: takeNudges,
     tooltipCopy: tooltipCopy,
     undo: undo,
     viewAt: viewAt,

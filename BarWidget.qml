@@ -6,8 +6,9 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// Drink and food clocks. Logging what you had resets that clock. The session
-// is shared by every monitor and is saved only when it changes.
+// Drink and food clocks. Logging what you had resets that clock. The words
+// steer the next habit: protein, vegetables, and water. The session is shared
+// by every monitor and is saved only when it changes.
 BarWidget {
   id: root
   moduleName: "giaodn.cadence"
@@ -24,6 +25,11 @@ BarWidget {
     foodMs: 0,
     foodFraction: 0,
     foodNote: "",
+    proteinAt: 0,
+    vegetableAt: 0,
+    hasPlate: false,
+    drinkNudge: "",
+    foodNudge: "",
     drinkMinutes: 120,
     foodMinutes: 240,
     remindAgainMinutes: 30,
@@ -67,6 +73,11 @@ BarWidget {
   readonly property double foodMs: view.foodMs
   readonly property real foodFraction: view.foodFraction
   readonly property string foodNote: view.foodNote
+  readonly property double proteinAt: view.proteinAt || 0
+  readonly property double vegetableAt: view.vegetableAt || 0
+  readonly property bool hasPlate: view.hasPlate === true
+  readonly property string drinkNudge: view.drinkNudge || ""
+  readonly property string foodNudge: view.foodNudge || ""
   readonly property int drinkMinutes: view.drinkMinutes
   readonly property int foodMinutes: view.foodMinutes
   readonly property int remindAgainMinutes: view.remindAgainMinutes
@@ -99,8 +110,19 @@ BarWidget {
   readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
   readonly property real openPanelIndicatorWidth: face.width
   readonly property real openPanelIndicatorHeight: face.height
+  function habitLine(code) {
+    var key = Model.nudgeKey(code)
+    if (!key) return ""
+    var titleKey = code === "sugary" ? "notice.nudge.drink.title" : "notice.nudge.food.title"
+    return Model.plain(strings.t(titleKey) + " · " + strings.t(key))
+  }
+
   readonly property string tooltip: {
     var line = tipFor("drink") + "    " + tipFor("food")
+    var drinkHabit = habitLine(drinkNudge)
+    var foodHabit = habitLine(foodNudge)
+    if (drinkHabit) line += "    " + drinkHabit
+    if (foodHabit) line += "    " + foodHabit
     if (asleep)
       return Model.plain(line + "    " + strings.t("bar.sleeping").arg(minuteClock(sleepEndMinutes)))
     if (windingDown) {
@@ -177,10 +199,15 @@ BarWidget {
     var quiet = Model.isAsleep(t)
     var notices = quiet ? [] : Model.dueNotices(t)
     var wind = quiet ? null : Model.windDownNotice(t)
+    // Quiet hours swallow the toast. The panel still shows the habit line.
+    var nudges = Model.takeNudges()
     view = Model.viewAt(t)
     saveState()
-    for (var i = 0; i < notices.length; i++) sendNotice(notices[i])
+    for (var i = 0; i < notices.length; i++) sendNotice(notices[i], t)
     if (wind) sendWindNotice(wind)
+    if (!quiet) {
+      for (var n = 0; n < nudges.length; n++) sendNudge(nudges[n])
+    }
     // The bowl replaces the diner bell while winding down, including the
     // minute a drink or a meal is due as well.
     if (wind) play(windPath)
@@ -249,13 +276,20 @@ BarWidget {
       bar.shell.updateEntryInline(moduleName, entry)
   }
 
-  function sendNotice(notice) {
+  function sendNotice(notice, t) {
     if (!notice || (notice.kind !== "drink" && notice.kind !== "food")) return
     var copy = Model.notificationCopy(
       strings.t("notice." + notice.kind + ".title"),
       strings.t("notice.body"),
       strings.t("notice.bodyEmpty"),
       notice.note)
+    if (notice.kind === "food") {
+      var miss = Model.missingKey(t)
+      if (miss === "notice.food.protein" || miss === "notice.food.vegetable" || miss === "notice.food.both") {
+        var extra = Model.plain(strings.t(miss))
+        copy.body = copy.body ? Model.plain(copy.body + " " + extra) : extra
+      }
+    }
     var argv = [
       "omarchy-notification-send",
       "--app-name", "Cadence",
@@ -265,6 +299,25 @@ BarWidget {
       copy.title
     ]
     if (copy.body) argv.push(copy.body)
+    Util.execArgv(argv)
+  }
+
+  function sendNudge(nudge) {
+    var key = Model.nudgeKey(nudge && nudge.code)
+    if (!key || (nudge.kind !== "drink" && nudge.kind !== "food")) return
+    var title = Model.plain(strings.t(nudge.kind === "drink" ? "notice.nudge.drink.title" : "notice.nudge.food.title"))
+    var advice = Model.plain(strings.t(key))
+    var last = Model.notificationCopy("", strings.t("notice.body"), "", nudge.note).body
+    var body = last ? Model.plain(advice + " " + last) : advice
+    var argv = [
+      "omarchy-notification-send",
+      "--app-name", "Cadence",
+      "-g", Model.glyph(nudge.kind === "food" ? "food" : "drink"),
+      "-u", "normal",
+      "-t", "12000",
+      title
+    ]
+    if (body) argv.push(body)
     Util.execArgv(argv)
   }
 
